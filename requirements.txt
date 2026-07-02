@@ -3,3 +3,4 @@ elevenlabs
 gunicorn
 python-dotenv
 requests
+google-genai
