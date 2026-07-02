@@ -1,19 +1,18 @@
 import os
-import requests
 from flask import Flask, request, render_template_string, Response
 from elevenlabs.client import ElevenLabs
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 load_dotenv()
 
 app = Flask(__name__)
 
 elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-
 latest_audio = None
 
 HTML = """
@@ -37,7 +36,7 @@ HTML = """
 <body>
   <main>
     <h1>🎙 Enterprise Meeting Copilot</h1>
-    <p>An AI voice copilot that helps Enterprise Account Executives prepare for executive meetings using real-time research and ElevenLabs voice generation.</p>
+    <p>An AI voice copilot that helps Enterprise Account Executives prepare for executive meetings using live company research and ElevenLabs voice generation.</p>
 
     <form method="post">
       <label>Company</label>
@@ -66,7 +65,7 @@ HTML = """
       <audio controls>
         <source src="/audio" type="audio/mpeg">
       </audio>
-      <p class="hint">Briefing generated from live web research and converted to voice with ElevenLabs.</p>
+      <p class="hint">Briefing generated with Gemini + Google Search grounding and converted to voice with ElevenLabs.</p>
     </div>
     {% endif %}
   </main>
@@ -74,64 +73,7 @@ HTML = """
 </html>
 """
 
-def get_search_queries(company, stakeholder):
-    role_focus = {
-        "CIO": "AI digital transformation cloud cybersecurity data platform automation IT strategy",
-        "CTO": "AI product engineering technology platform innovation developer infrastructure",
-        "CHRO": "HR transformation hiring talent workforce learning employee experience AI HR",
-        "CFO": "budget cost reduction margin efficiency investment financial results AI ROI",
-        "CMO": "customer experience marketing personalization digital media loyalty brand AI",
-        "CEO": "strategy leadership new CEO transformation growth investment AI market expansion",
-    }
-
-    focus = role_focus.get(stakeholder, "AI transformation digital innovation leadership")
-
-    return [
-        f"{company} latest news new CEO CIO CTO CHRO CFO CMO leadership change",
-        f"{company} {focus} recent investment budget initiative",
-        f"{company} AI digital transformation automation customer experience latest news",
-    ]
-
-def tavily_search(company, stakeholder):
-    if not TAVILY_API_KEY:
-        return "No Tavily API key configured."
-
-    results = []
-
-    for query in get_search_queries(company, stakeholder):
-        response = requests.post(
-            "https://api.tavily.com/search",
-            headers={
-                "Authorization": f"Bearer {TAVILY_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "query": query,
-                "search_depth": "basic",
-                "max_results": 4,
-                "include_answer": True,
-                "include_raw_content": False,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        if data.get("answer"):
-            results.append(f"Search answer for '{query}': {data['answer']}")
-
-        for item in data.get("results", []):
-            title = item.get("title", "")
-            url = item.get("url", "")
-            content = item.get("content", "")
-            results.append(f"- {title}\n  {content}\n  Source: {url}")
-
-    return "\n\n".join(results[:12])
-
-def generate_dynamic_briefing(company, stakeholder, objective, research):
-    if not OPENROUTER_API_KEY:
-        return "No OpenRouter API key configured."
-
+def generate_dynamic_briefing(company, stakeholder, objective):
     prompt = f"""
 You are an Enterprise Account Executive meeting copilot.
 
@@ -141,18 +83,19 @@ Company: {company}
 Stakeholder: {stakeholder}
 Meeting objective: {objective}
 
-Use the web research below. Be practical and sales-oriented.
-If the research mentions leadership changes, new CEO, new CIO, new CHRO, new CFO, new CMO, digital transformation, AI investment, HR budget, IT budget, cost reduction, hiring, layoffs, acquisitions, or strategic initiatives, highlight them clearly.
-
-Web research:
-{research}
+Use live web research. Look specifically for:
+- recent leadership changes: new CEO, CIO, CTO, CHRO, CFO, CMO
+- AI, digital transformation, automation, cloud, HR, finance or customer experience initiatives
+- budget or investment signals
+- cost-reduction, efficiency, hiring, layoffs, acquisition or expansion signals
+- business priorities that matter to the selected stakeholder
 
 Return the briefing in this structure:
 
 1. What changed recently
 - Bullet points with the most useful recent signals.
 - Mention if there is a new CEO, CIO, CHRO, CFO or other relevant executive.
-- Mention any AI, HR, IT, digital transformation or efficiency initiative.
+- Mention any AI, HR, IT, digital transformation, budget or efficiency initiative.
 
 2. Why it matters for a {stakeholder}
 - Explain what this stakeholder is likely to care about.
@@ -172,27 +115,15 @@ Return the briefing in this structure:
 Keep it sharp, useful and under 450 words.
 """
 
-    response = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/cristinarago1094/enterprise-meeting-copilot",
-            "X-Title": "Enterprise Meeting Copilot",
-        },
-        json={
-            "model": "openai/gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": "You are a practical enterprise sales coach."},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.4,
-        },
-        timeout=60,
+    response = gemini_client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        ),
     )
-    response.raise_for_status()
-    data = response.json()
-    return data["choices"][0]["message"]["content"]
+
+    return response.text
 
 @app.route("/", methods=["GET", "POST"])
 def home():
@@ -204,8 +135,7 @@ def home():
         stakeholder = request.form.get("stakeholder", "")
         objective = request.form.get("objective", "")
 
-        research = tavily_search(company, stakeholder)
-        briefing = generate_dynamic_briefing(company, stakeholder, objective, research)
+        briefing = generate_dynamic_briefing(company, stakeholder, objective)
 
         audio = elevenlabs_client.text_to_speech.convert(
             voice_id=VOICE_ID,
