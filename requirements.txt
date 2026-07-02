@@ -1,3 +1,4 @@
 flask
 elevenlabs
 gunicorn
+python-dotenv
