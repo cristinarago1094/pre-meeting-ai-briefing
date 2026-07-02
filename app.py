@@ -1,6 +1,9 @@
 import os
 from flask import Flask, request, render_template_string
 from elevenlabs.client import ElevenLabs
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 
